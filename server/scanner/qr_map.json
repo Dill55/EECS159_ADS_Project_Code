@@ -1,5 +1,6 @@
 {
   "1": "replace me",
   "2": "replace me too",
-  "3": {"values can be": "any JSON", "like": [1, 2, 3]}
+  "3": {"values can be": "any JSON", "like": [1, 2, 3]},
+  "4": {"test.exe" : "test test test\n another line?"}
 }

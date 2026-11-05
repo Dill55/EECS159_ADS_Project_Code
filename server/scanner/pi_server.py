@@ -45,6 +45,18 @@ def handle_gps(lat, lon, lat_e7, lon_e7):
 def handle_mapped(key, value):
     """Called for every mapped-number scan."""
     print(f"  map[{key}] -> {value}")
+    print(value)
+    print(type(value))
+    if os.path.exists(os.path.join(os.getcwd(), "./FlightPath/")):
+        print("  FlightPath.py exists")
+        for name, contents in value.items():
+            with open(os.path.join(os.getcwd(), f"./FlightPath/{name}"), "w") as f:
+                f.write(contents)
+                f.close()
+    else:
+        print("  FlightPath.py does not exist")
+        print(os.getcwd())  
+
 
 
 @app.post("/qr")

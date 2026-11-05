@@ -94,6 +94,9 @@ def send_to_pi(url, payload):
         return True
     except requests.RequestException as e:
         print(f"[error] couldn't reach the Pi: {e}")
+        print(url)
+        print(payload)
+        print("HERE !!!!!!!!")
         return False
 
 
