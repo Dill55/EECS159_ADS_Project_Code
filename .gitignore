@@ -1,3 +1,4 @@
 FlightPath/test.exe
 raspberry_pi/scans.csv
 FlightPath/FlightPath.py
+server/scanner/scans.csv
