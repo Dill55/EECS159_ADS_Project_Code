@@ -45,18 +45,22 @@ def handle_gps(lat, lon, lat_e7, lon_e7):
 def handle_mapped(key, value):
     """Called for every mapped-number scan."""
     print(f"  map[{key}] -> {value}")
-    print(value)
-    print(type(value))
+
+    # Only entries shaped like {"file name": "contents"} are written as files
+    if not isinstance(value, dict):
+        print("  not a file entry, nothing to write")
+        return
+
     if os.path.exists(os.path.join(os.getcwd(), "./FlightPath/")):
-        print("  FlightPath.py exists")
         for name, contents in value.items():
+            if not isinstance(contents, str):
+                print(f"  skipping {name!r}: contents must be text")
+                continue
             with open(os.path.join(os.getcwd(), f"./FlightPath/{name}"), "w") as f:
                 f.write(contents)
-                f.close()
+            print(f"  wrote FlightPath/{name}")
     else:
-        print("  FlightPath.py does not exist")
-        print(os.getcwd())  
-
+        print(f"  FlightPath/ folder not found in {os.getcwd()}")
 
 
 @app.post("/qr")
