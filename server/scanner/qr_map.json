@@ -1,6 +1,4 @@
 {
-  "1": "replace me",
-  "2": "replace me too",
-  "3": {"values can be": "any JSON", "like": [1, 2, 3]},
-  "4": {"test.exe" : "test test test\n another line?"}
+  "1": {"test.wtvr" : {"file" : "test.wtvr"}
+       ,"test2.again" : {"file" : "test2.again"}}
 }
