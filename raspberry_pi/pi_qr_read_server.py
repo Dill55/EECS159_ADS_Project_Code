@@ -10,12 +10,19 @@ one to scans.csv. Two kinds of scan arrive:
                   MISSION_ITEM_INT x/y or SET_POSITION_TARGET_GLOBAL_INT).
   type "mapped":  key (the scanned number) and value (from your map).
 
+Mapped values shaped like {"file name": contents} are written into
+FlightPath/. Contents are either plain text, or {"b64": ...} for a file the
+scanner read from disk, which is decoded back to the exact original bytes
+(works for binary files).
+
 Edit handle_gps() / handle_mapped() to act on the data, e.g. send a waypoint
 to the flight controller with pymavlink.
 
 Install:  pip install flask      (or: sudo apt install python3-flask)
-Run:      python3 pi_server.py
+Run:      python3 pi_qr_read_server.py
 """
+import base64
+import binascii
 import csv
 import datetime
 import json
@@ -37,6 +44,16 @@ def log_scan(row):
         w.writerow(row)
 
 
+def summarize(value):
+    """Copy of value for printing/logging, with file contents shown as their size."""
+    if isinstance(value, dict):
+        if set(value) == {"b64"} and isinstance(value["b64"], str):
+            b64 = value["b64"]
+            return f"<file, {len(b64) * 3 // 4 - b64[-2:].count('=')} bytes>"
+        return {k: summarize(v) for k, v in value.items()}
+    return value
+
+
 def handle_gps(lat, lon, lat_e7, lon_e7):
     """Called for every GPS scan. lat_e7/lon_e7 are ready for ArduPilot."""
     print(f"  GPS -> lat_e7={lat_e7}, lon_e7={lon_e7}")
@@ -44,21 +61,29 @@ def handle_gps(lat, lon, lat_e7, lon_e7):
 
 def handle_mapped(key, value):
     """Called for every mapped-number scan."""
-    print(f"  map[{key}] -> {value}")
+    print(f"  map[{key}] -> {summarize(value)}")
 
-    # Only entries shaped like {"file name": "contents"} are written as files
+    # Only entries shaped like {"file name": contents} are written as files
     if not isinstance(value, dict):
         print("  not a file entry, nothing to write")
         return
 
     if os.path.exists(os.path.join(os.getcwd(), "./FlightPath/")):
         for name, contents in value.items():
-            if not isinstance(contents, str):
-                print(f"  skipping {name!r}: contents must be text")
+            if isinstance(contents, str):
+                data, mode = contents, "w"            # text typed into the map
+            elif isinstance(contents, dict) and isinstance(contents.get("b64"), str):
+                try:                                  # file sent from disk
+                    data, mode = base64.b64decode(contents["b64"], validate=True), "wb"
+                except binascii.Error:
+                    print(f"  skipping {name!r}: file data is corrupted")
+                    continue
+            else:
+                print(f"  skipping {name!r}: contents must be text or a file")
                 continue
-            with open(os.path.join(os.getcwd(), f"./FlightPath/{name}"), "w") as f:
-                f.write(contents)
-            print(f"  wrote FlightPath/{name}")
+            with open(os.path.join(os.getcwd(), f"./FlightPath/{name}"), mode) as f:
+                f.write(data)
+            print(f"  wrote FlightPath/{name} ({len(data)} {'bytes' if mode == 'wb' else 'characters'})")
     else:
         print(f"  FlightPath/ folder not found in {os.getcwd()}")
 
@@ -86,7 +111,8 @@ def receive_qr():
     else:
         return jsonify(error="type must be 'gps' or 'mapped'"), 400
 
-    row = {**body, "timestamp": when}
+    # Log file sizes instead of full file contents so scans.csv stays small
+    row = {**body, "timestamp": when, "value": summarize(body.get("value"))}
     if not isinstance(row.get("value"), (str, int, float, type(None))):
         row["value"] = json.dumps(row["value"])  # store lists/objects as JSON text
     log_scan(row)

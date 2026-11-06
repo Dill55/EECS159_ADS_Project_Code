@@ -3,7 +3,8 @@
 Webcam QR scanner -> Raspberry Pi uploader.
 
 Runs on your computer. Opens the webcam, detects QR codes, processes each
-one, and POSTs the result to the receiver on the Raspberry Pi (pi_server.py).
+one, and POSTs the result to the receiver on the Raspberry Pi
+(raspberry_pi/pi_qr_read_server.py).
 
 How each QR code is processed:
   - "GPS(lat,lon)"  -> converted to ArduPilot/MAVLink format: degrees * 1e7
@@ -12,11 +13,18 @@ How each QR code is processed:
                        value is what gets sent. Numbers not in the map are skipped.
   - anything else   -> skipped (not sent), with a message in the terminal.
 
+Sending files: a map entry shaped like {"name on Pi": {"file": "path"}} sends
+that file from this computer to the Pi. Any file works, text or binary. The
+file is read fresh on every scan, and relative paths are relative to the
+folder qr_map.json is in. Contents typed directly ({"name": "text"}) still work.
+
 Install:  pip install opencv-python requests
 Run:      python qr_scanner.py --pi 192.168.1.50 --map qr_map.json
 """
 import argparse
+import base64
 import json
+import os
 import re
 import time
 
@@ -61,7 +69,34 @@ def lookup_number(text, mapping):
     return None, None
 
 
-def process_qr(text, mapping):
+def load_files(value, map_dir):
+    """Replace {"file": path} entries with that file's bytes, base64-encoded.
+
+    The Pi turns {"b64": ...} back into the exact original bytes, so binary
+    files arrive unchanged. Raises OSError if a file can't be read.
+    """
+    if not isinstance(value, dict):
+        return value
+    out = {}
+    for name, spec in value.items():
+        if isinstance(spec, dict) and "file" in spec:
+            with open(os.path.join(map_dir, spec["file"]), "rb") as f:
+                out[name] = {"b64": base64.b64encode(f.read()).decode("ascii")}
+        else:
+            out[name] = spec
+    return out
+
+
+def summarize(value):
+    """Copy of value for printing, with file contents shown as their size."""
+    if isinstance(value, dict):
+        if set(value) == {"b64"}:
+            return f"<file, {len(base64.b64decode(value['b64']))} bytes>"
+        return {k: summarize(v) for k, v in value.items()}
+    return value
+
+
+def process_qr(text, mapping, map_dir="."):
     """Turn raw QR text into the payload for the Pi, or None to skip it."""
     gps = GPS_PATTERN.match(text)
     if gps:
@@ -79,6 +114,11 @@ def process_qr(text, mapping):
         if key is None:
             print(f"[skip] {text!r} is not in the map")
             return None
+        try:
+            value = load_files(value, map_dir)
+        except OSError as e:
+            print(f"[skip] {text!r}: couldn't read file: {e}")
+            return None
         return {"type": "mapped", "raw": text, "key": key, "value": value}
 
     print(f"[skip] {text!r} is neither GPS(...) nor a number")
@@ -90,7 +130,7 @@ def send_to_pi(url, payload):
     try:
         r = requests.post(url, json=payload, timeout=5)
         r.raise_for_status()
-        print(f"[sent] {payload}")
+        print(f"[sent] {summarize(payload)}")
         return True
     except requests.RequestException as e:
         print(f"[error] couldn't reach the Pi: {e}")
@@ -108,6 +148,7 @@ def main():
     args = p.parse_args()
 
     mapping = load_map(args.map)
+    map_dir = os.path.dirname(os.path.abspath(args.map))
     print(f"Loaded {len(mapping)} entries from {args.map}")
 
     url = f"http://{args.pi}:{args.port}/qr"
@@ -135,7 +176,7 @@ def main():
             now = time.time()
             if now - last_seen.get(data, 0) > args.cooldown:
                 last_seen[data] = now
-                payload = process_qr(data, mapping)
+                payload = process_qr(data, mapping, map_dir)
                 if payload is not None and not send_to_pi(url, payload):
                     last_seen.pop(data)  # retry next frame if the send failed
 
