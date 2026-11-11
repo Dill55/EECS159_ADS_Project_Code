@@ -1,16 +1,21 @@
+"""
+Server for the Raspberry Pi QR scanner (raspberry_pi/alternate_read.py).
+
+  GET  /ask?key=<n>  looks n up in scanner/qr_map.json and returns the entry,
+                     with {"file": path} entries replaced by that file's bytes
+                     (base64), so the Pi can save them.
+  POST /ads_server   receives GPS scans from the Pi.
+  GET  /scans        shows everything logged in scans.csv.
+
+Install:  pip install flask
+Run:      python3 alternate_send.py
+"""
 import base64
-import binascii
 import csv
 import datetime
 import json
 import os
-import argparse
-import base64
 import re
-import time
-
-import cv2
-import requests
 
 from flask import Flask, jsonify, request
 
@@ -21,10 +26,6 @@ MAP_FILE = os.path.join(SERVER_DIR, "scanner", "qr_map.json")
 MAP_DIR = os.path.dirname(MAP_FILE)  # {"file": path} entries are relative to this
 FIELDS = ["timestamp", "type", "raw", "lat", "lon", "lat_e7", "lon_e7", "key", "value"]
 
-GPS_PATTERN = re.compile(
-    r"^\s*GPS\s*\(\s*([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)\s*\)\s*$",
-    re.IGNORECASE,
-)
 NUMBER_PATTERN = re.compile(r"^\s*[-+]?\d+(?:\.\d+)?\s*$")
 
 def load_map(path):
@@ -90,35 +91,6 @@ def handle_gps(lat, lon, lat_e7, lon_e7):
     print(f"  GPS -> lat_e7={lat_e7}, lon_e7={lon_e7}")
 
 
-def handle_mapped(key, value):
-    """Called for every mapped-number scan."""
-    print(f"  map[{key}] -> {summarize(value)}")
-
-    # Only entries shaped like {"file name": contents} are written as files
-    if not isinstance(value, dict):
-        print("  not a file entry, nothing to write")
-        return
-
-    if os.path.exists(os.path.join(os.getcwd(), "./FlightPath/")):
-        for name, contents in value.items():
-            if isinstance(contents, str):
-                data, mode = contents, "w"            # text typed into the map
-            elif isinstance(contents, dict) and isinstance(contents.get("b64"), str):
-                try:                                  # file sent from disk
-                    data, mode = base64.b64decode(contents["b64"], validate=True), "wb"
-                except binascii.Error:
-                    print(f"  skipping {name!r}: file data is corrupted")
-                    continue
-            else:
-                print(f"  skipping {name!r}: contents must be text or a file")
-                continue
-            with open(os.path.join(os.getcwd(), f"./FlightPath/{name}"), mode) as f:
-                f.write(data)
-            print(f"  wrote FlightPath/{name} ({len(data)} {'bytes' if mode == 'wb' else 'characters'})")
-    else:
-        print(f"  FlightPath/ folder not found in {os.getcwd()}")
-
-
 @app.post("/ads_server")
 def receive_qr():
     body = request.get_json(silent=True) or {}
@@ -134,19 +106,11 @@ def receive_qr():
             return jsonify(error="gps scan needs integer lat_e7 and lon_e7"), 400
         print(f"[{when}] GPS scan {body.get('raw')!r}")
         handle_gps(body.get("lat"), body.get("lon"), lat_e7, lon_e7)
-    elif kind == "mapped":
-        if "key" not in body or "value" not in body:
-            return jsonify(error="mapped scan needs key and value"), 400
-        print(f"[{when}] mapped scan {body.get('raw')!r}")
-        handle_mapped(body["key"], body["value"])
     else:
-        return jsonify(error="type must be 'gps' or 'mapped'"), 400
+        # Number codes go to GET /ask instead, so only GPS scans arrive here
+        return jsonify(error="type must be 'gps'"), 400
 
-    # Log file sizes instead of full file contents so scans.csv stays small
-    row = {**body, "timestamp": when, "value": summarize(body.get("value"))}
-    if not isinstance(row.get("value"), (str, int, float, type(None))):
-        row["value"] = json.dumps(row["value"])  # store lists/objects as JSON text
-    log_scan(row)
+    log_scan({**body, "timestamp": when})
     return jsonify(status="ok")
 
 

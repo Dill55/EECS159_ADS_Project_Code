@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
 """
-Webcam QR scanner -> Raspberry Pi uploader.
+Raspberry Pi QR scanner.
 
-Runs on your computer. Opens the webcam, detects QR codes, processes each
-one, and POSTs the result to the receiver on the Raspberry Pi
-(raspberry_pi/pi_qr_read_server.py).
+Runs on the Pi. Reads QR codes from the Pi camera and talks to the server
+(server/alternate_send.py).
 
 How each QR code is processed:
+  - a number        -> looked up on the server (GET /ask). The files the
+                       server returns are saved into --out (default FlightPath/).
   - "GPS(lat,lon)"  -> converted to ArduPilot/MAVLink format: degrees * 1e7
                        as integers (e.g. GPS(33.2, -117.24) -> 332000000, -1172400000)
-  - a number        -> looked up in your map file (qr_map.json); the map's
-                       value is what gets sent. Numbers not in the map are skipped.
-  - anything else   -> skipped (not sent), with a message in the terminal.
-
-Sending files: a map entry shaped like {"name on Pi": {"file": "path"}} sends
-that file from this computer to the Pi. Any file works, text or binary. The
-file is read fresh on every scan, and relative paths are relative to the
-folder qr_map.json is in. Contents typed directly ({"name": "text"}) still work.
-
-Number codes are looked up on the server (GET /ask); the files it returns
-are saved into --out (default FlightPath/).
+                       and POSTed to the server (/ads_server).
+  - anything else   -> skipped, with a message in the terminal.
 
 Install:  pip install opencv-python requests   (plus picamera2 on the Pi)
 Run:      python3 alternate_read.py --ip 192.168.1.50
 """
 import argparse
 import base64
-import json
+import binascii
 import os
 import re
 import time
-
-import binascii
 
 import cv2
 import requests
@@ -44,15 +34,6 @@ GPS_PATTERN = re.compile(
 NUMBER_PATTERN = re.compile(r"^\s*[-+]?\d+(?:\.\d+)?\s*$")
 
 
-def load_map(path):
-    with open(path) as f:
-        m = json.load(f)
-    if not isinstance(m, dict):
-        raise SystemExit(f"{path} must contain a JSON object like {{\"1\": \"value\"}}")
-    # JSON keys are always strings; keep them that way for lookup
-    return {str(k).strip(): v for k, v in m.items()}
-
-
 def to_ardupilot(lat, lon):
     """Convert decimal degrees to MAVLink/ArduPilot int32 degE7 format."""
     if not -90 <= lat <= 90:
@@ -60,36 +41,6 @@ def to_ardupilot(lat, lon):
     if not -180 <= lon <= 180:
         raise ValueError(f"longitude {lon} is out of range (-180 to 180)")
     return round(lat * 1e7), round(lon * 1e7)
-
-
-def lookup_number(text, mapping):
-    """Find a number in the map. '5', '05' and '5.0' all match a key of '5'."""
-    text = text.strip()
-    if text in mapping:
-        return text, mapping[text]
-    num = float(text)
-    for candidate in (str(int(num)) if num.is_integer() else None, repr(num)):
-        if candidate is not None and candidate in mapping:
-            return candidate, mapping[candidate]
-    return None, None
-
-
-def load_files(value, map_dir):
-    """Replace {"file": path} entries with that file's bytes, base64-encoded.
-
-    The Pi turns {"b64": ...} back into the exact original bytes, so binary
-    files arrive unchanged. Raises OSError if a file can't be read.
-    """
-    if not isinstance(value, dict):
-        return value
-    out = {}
-    for name, spec in value.items():
-        if isinstance(spec, dict) and "file" in spec:
-            with open(os.path.join(map_dir, spec["file"]), "rb") as f:
-                out[name] = {"b64": base64.b64encode(f.read()).decode("ascii")}
-        else:
-            out[name] = spec
-    return out
 
 
 def summarize(value):
@@ -101,8 +52,11 @@ def summarize(value):
     return value
 
 
-def process_qr(text, mapping, map_dir="."):
-    """Turn raw QR text into the payload for the Pi, or None to skip it."""
+def process_qr(text):
+    """Turn a GPS(...) QR code into the payload for the server, or None to skip it.
+
+    Number codes never reach here: main() sends them to ask_server() instead.
+    """
     gps = GPS_PATTERN.match(text)
     if gps:
         lat, lon = float(gps.group(1)), float(gps.group(2))
@@ -113,18 +67,6 @@ def process_qr(text, mapping, map_dir="."):
             return None
         return {"type": "gps", "raw": text, "lat": lat, "lon": lon,
                 "lat_e7": lat_e7, "lon_e7": lon_e7}
-
-    if NUMBER_PATTERN.match(text):
-        key, value = lookup_number(text, mapping)
-        if key is None:
-            print(f"[skip] {text!r} is not in the map")
-            return None
-        try:
-            value = load_files(value, map_dir)
-        except OSError as e:
-            print(f"[skip] {text!r}: couldn't read file: {e}")
-            return None
-        return {"type": "mapped", "raw": text, "key": key, "value": value}
 
     print(f"[skip] {text!r} is neither GPS(...) nor a number")
     return None
@@ -212,21 +154,11 @@ def main():
     p = argparse.ArgumentParser(description="Scan QR codes and upload them to a Raspberry Pi.")
     p.add_argument("--ip", required=True, help="Server's IP address or hostname, e.g. 192.168.1.50 or raspberrypi.local")
     p.add_argument("--port", type=int, default=5000, help="Port the Pi server listens on (default 5000)")
-    p.add_argument("--map", default="qr_map.json",
-                   help="Optional local JSON map (default qr_map.json). Number codes are "
-                        "looked up on the server, so this file is not required.")
     p.add_argument("--out", default="FlightPath",
                    help="Folder to save files returned by the server (default FlightPath)")
     p.add_argument("--cooldown", type=float, default=3.0,
                    help="Seconds before the same code is handled again (default 3)")
     args = p.parse_args()
-
-    if os.path.exists(args.map):
-        mapping = load_map(args.map)
-        print(f"Loaded {len(mapping)} entries from {args.map}")
-    else:
-        mapping = {}
-    map_dir = os.path.dirname(os.path.abspath(args.map))
 
     url = f"http://{args.ip}:{args.port}/ads_server"
     ask_url = f"http://{args.ip}:{args.port}/ask"
@@ -263,7 +195,7 @@ def main():
                         elif reply:
                             save_files(reply.get("value"), args.out)
                     else:
-                        payload = process_qr(data, mapping, map_dir)
+                        payload = process_qr(data)
                         if payload is not None and not send_to_pi(url, payload):
                             last_seen.pop(data)  # retry next frame if the send failed
 

@@ -3,4 +3,4 @@ raspberry_pi/scans.csv
 FlightPath/FlightPath.py
 server/scanner/scans.csv
 server/scanner/test.wtvr
-server/scanner/test2.again
+server/scanner/test2.again__pycache__/
