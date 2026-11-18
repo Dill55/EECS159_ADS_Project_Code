@@ -21,6 +21,7 @@ to the flight controller with pymavlink.
 Install:  pip install flask      (or: sudo apt install python3-flask)
 Run:      python3 pi_qr_read_server.py
 """
+import argparse
 import base64
 import binascii
 import csv
@@ -33,6 +34,14 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scans.csv")
 FIELDS = ["timestamp", "type", "raw", "lat", "lon", "lat_e7", "lon_e7", "key", "value"]
+
+# flight_server.py launches this script and reads lines starting with this prefix
+EVENT_PREFIX = "FLIGHT_EVENT "
+
+
+def emit_event(event):
+    """Print one accepted scan, as JSON, for flight_server.py."""
+    print(EVENT_PREFIX + json.dumps(event), flush=True)
 
 
 def log_scan(row):
@@ -116,6 +125,8 @@ def receive_qr():
     if not isinstance(row.get("value"), (str, int, float, type(None))):
         row["value"] = json.dumps(row["value"])  # store lists/objects as JSON text
     log_scan(row)
+    emit_event({k: body.get(k) for k in ("type", "raw", "lat", "lon", "lat_e7", "lon_e7", "key")}
+               | {"value": summarize(body.get("value"))})
     return jsonify(status="ok")
 
 
@@ -129,5 +140,8 @@ def list_scans():
 
 
 if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="Receive QR scans on the Raspberry Pi.")
+    p.add_argument("--port", type=int, default=5000, help="Port to listen on (default 5000)")
+    args = p.parse_args()
     # 0.0.0.0 makes it reachable from other devices on your network
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=args.port)

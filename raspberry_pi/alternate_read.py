@@ -29,6 +29,8 @@ import base64
 import json
 import os
 import re
+import signal
+import sys
 import time
 
 import binascii
@@ -42,6 +44,14 @@ GPS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NUMBER_PATTERN = re.compile(r"^\s*[-+]?\d+(?:\.\d+)?\s*$")
+
+# flight_server.py launches this script and reads lines starting with this prefix
+EVENT_PREFIX = "FLIGHT_EVENT "
+
+
+def emit_event(event):
+    """Print one result the server confirmed, as JSON, for flight_server.py."""
+    print(EVENT_PREFIX + json.dumps(event), flush=True)
 
 
 def load_map(path):
@@ -232,6 +242,10 @@ def main():
     ask_url = f"http://{args.ip}:{args.port}/ask"
 
 
+    # flight_server.py stops this script with SIGTERM; turn that into a normal
+    # exit so the finally block below releases the camera for the next launch.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+
     from picamera2 import Picamera2  # type: ignore[reportMissingImports]  # imported here so the helpers above work off-Pi
     picam = Picamera2()
     picam.configure(picam.create_video_configuration(main={"format": "RGB888", "size": (640, 480)}))
@@ -261,11 +275,16 @@ def main():
                         if reply is None:
                             last_seen.pop(data)  # retry next frame if the ask failed
                         elif reply:
-                            save_files(reply.get("value"), args.out)
+                            written = save_files(reply.get("value"), args.out)
+                            emit_event({"type": "mapped", "raw": data, "key": reply.get("key"),
+                                        "value": summarize(reply.get("value")), "files": written})
                     else:
                         payload = process_qr(data, mapping, map_dir)
-                        if payload is not None and not send_to_pi(url, payload):
-                            last_seen.pop(data)  # retry next frame if the send failed
+                        if payload is not None:
+                            if send_to_pi(url, payload):
+                                emit_event(summarize(payload))  # server accepted it
+                            else:
+                                last_seen.pop(data)  # retry next frame if the send failed
 
             cv2.imshow("QR Scanner (q to quit)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
