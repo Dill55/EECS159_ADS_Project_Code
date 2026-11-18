@@ -70,85 +70,6 @@ scan_queue: "queue.Queue[dict]" = queue.Queue()
 
 
 # ---------------------------------------------------------------------------
-# Scanner process (runs alternate_read.py or pi_qr_read_server.py)
-# ---------------------------------------------------------------------------
-def scanner_command():
-    if SCAN_SOURCE == "alternate":
-        script, args = "alternate_read.py", ["--ip", SERVER_IP, "--port", str(SERVER_PORT)]
-    elif SCAN_SOURCE == "offgrid":
-        script, args = "pi_qr_read_server.py", ["--port", str(SERVER_PORT)]
-    else:
-        raise ValueError(f"SCAN_SOURCE must be 'alternate' or 'offgrid', not {SCAN_SOURCE!r}")
-    # -u: unbuffered output, so results arrive as soon as they're printed
-    return [sys.executable, "-u", os.path.join(PI_DIR, script), *args]
-
-
-class ScannerProcess:
-    """Starts/stops the scanner without blocking the tick functions.
-
-    A background thread reads the scanner's output. Lines starting with
-    EVENT_PREFIX are JSON results confirmed by the server and go onto
-    scan_queue; everything else is echoed to this terminal.
-    """
-
-    def __init__(self):
-        self.proc = None
-        self.last_start = -math.inf
-
-    def running(self):
-        return self.proc is not None and self.proc.poll() is None
-
-    def ensure_running(self):
-        """Launch the scanner if it isn't running (rate-limited so a crash doesn't spin)."""
-        if self.running():
-            return
-        if self.proc is not None:
-            print(f"[flight] scanner exited with code {self.proc.returncode}")
-            self.proc = None
-        if time.monotonic() - self.last_start < SCANNER_RESTART_DELAY:
-            return
-        self.last_start = time.monotonic()
-        cmd = scanner_command()
-        print(f"[flight] launching scanner: {' '.join(cmd)}")
-        self.proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        threading.Thread(target=self._read_output, args=(self.proc,), daemon=True).start()
-
-    def stop(self):
-        """Ask the scanner to quit. Waiting for it happens in a background thread."""
-        proc, self.proc = self.proc, None
-        if proc is None or proc.poll() is not None:
-            return
-        print("[flight] stopping scanner")
-        proc.terminate()
-        threading.Thread(target=self._reap, args=(proc,), daemon=True).start()
-
-    @staticmethod
-    def _reap(proc):
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-    @staticmethod
-    def _read_output(proc):
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if line.startswith(EVENT_PREFIX):
-                try:
-                    scan_queue.put(json.loads(line[len(EVENT_PREFIX):]))
-                except json.JSONDecodeError:
-                    print(f"[flight] bad event from scanner: {line!r}")
-            else:
-                print(f"[scanner] {line}")
-
-
-scanner = ScannerProcess()
-
-
-# ---------------------------------------------------------------------------
 # Task framework
 # ---------------------------------------------------------------------------
 @dataclass
@@ -277,12 +198,44 @@ def telemetryScan_tick(state):
 
 
 # ---------------------------------------------------------------------------
+# Task 4: Publish photo
+# ---------------------------------------------------------------------------
+class PublishPhotoState(Enum):
+    START = auto()
+    INIT = auto()
+    WAIT = auto()
+
+
+def publishPhoto_tick(state):
+    # --- transitions ---
+    if state == PublishPhotoState.START:
+        state = PublishPhotoState.INIT
+    elif state == PublishPhotoState.INIT:
+        if shared["armed"]:
+            state = PublishPhotoState.WAIT
+    elif state == PublishPhotoState.WAIT:
+        if shared["mission_done"]:
+            state = PublishPhotoState.INIT
+            send_photo()  # TODO: send photo to server
+    else:
+        state = PublishPhotoState.START
+
+    # --- actions ---
+    if state == PublishPhotoState.INIT:
+        pass  
+    elif state == PublishPhotoState.WAIT:
+        pass
+
+    return state
+
+# ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
 TASKS = [
     Task("scan",      period=0.05, state=ScanState.START,      tick=scan_tick),
     Task("flight",    period=0.10, state=FlightState.START,    tick=flight_tick),
     Task("telemetryScan", period=1.00, state=TelemetryScanState.START, tick=telemetryScan_tick),
+    Task("publishPhoto", period=5.00, state=PublishPhotoState.START, tick=publishPhoto_tick),
 ]
 
 
@@ -313,6 +266,89 @@ def run():
         else:
             # Overran the period: tick functions took too long.
             next_tick = time.monotonic()
+
+
+# ---------------------------------------------------------------------------
+# Scanner process (runs alternate_read.py or pi_qr_read_server.py)
+# ---------------------------------------------------------------------------
+def scanner_command():
+    if SCAN_SOURCE == "alternate":
+        script, args = "alternate_read.py", ["--ip", SERVER_IP, "--port", str(SERVER_PORT)]
+    elif SCAN_SOURCE == "offgrid":
+        script, args = "pi_qr_read_server.py", ["--port", str(SERVER_PORT)]
+    else:
+        raise ValueError(f"SCAN_SOURCE must be 'alternate' or 'offgrid', not {SCAN_SOURCE!r}")
+    # -u: unbuffered output, so results arrive as soon as they're printed
+    return [sys.executable, "-u", os.path.join(PI_DIR, script), *args]
+
+
+class ScannerProcess:
+    """Starts/stops the scanner without blocking the tick functions.
+
+    A background thread reads the scanner's output. Lines starting with
+    EVENT_PREFIX are JSON results confirmed by the server and go onto
+    scan_queue; everything else is echoed to this terminal.
+    """
+
+    def __init__(self):
+        self.proc = None
+        self.last_start = -math.inf
+
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def ensure_running(self):
+        """Launch the scanner if it isn't running (rate-limited so a crash doesn't spin)."""
+        if self.running():
+            return
+        if self.proc is not None:
+            print(f"[flight] scanner exited with code {self.proc.returncode}")
+            self.proc = None
+        if time.monotonic() - self.last_start < SCANNER_RESTART_DELAY:
+            return
+        self.last_start = time.monotonic()
+        cmd = scanner_command()
+        print(f"[flight] launching scanner: {' '.join(cmd)}")
+        self.proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        threading.Thread(target=self._read_output, args=(self.proc,), daemon=True).start()
+
+    def stop(self):
+        """Ask the scanner to quit. Waiting for it happens in a background thread."""
+        proc, self.proc = self.proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        print("[flight] stopping scanner")
+        proc.terminate()
+        threading.Thread(target=self._reap, args=(proc,), daemon=True).start()
+
+    @staticmethod
+    def _reap(proc):
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    @staticmethod
+    def _read_output(proc):
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line.startswith(EVENT_PREFIX):
+                try:
+                    scan_queue.put(json.loads(line[len(EVENT_PREFIX):]))
+                except json.JSONDecodeError:
+                    print(f"[flight] bad event from scanner: {line!r}")
+            else:
+                print(f"[scanner] {line}")
+
+
+scanner = ScannerProcess()
+
+def send_photo():
+    print("Sending photo to server...    TODO: implement photo sending logic")
+    pass
 
 
 if __name__ == "__main__":
