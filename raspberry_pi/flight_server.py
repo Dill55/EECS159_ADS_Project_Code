@@ -15,9 +15,9 @@ Rules for tick functions:
     or process that hands data over through a queue.Queue, which a task
     polls with get_nowait().
 
-Scanning: while the flight task is in IDLE, it runs the scanner chosen by
-SCAN_SOURCE as a child process and reads the results the server confirms
-(see ScannerProcess). When a GPS waypoint comes in, the scanner is stopped
+QR scanning: while the flight task is in IDLE, it runs the QR scanner chosen by
+QR_SCAN_SOURCE as a child process and reads the results the server confirms
+(see QrScannerProcess). When a GPS waypoint comes in, the QR scanner is stopped
 and the flight starts.
 
 Run:  python3 flight_server.py
@@ -37,22 +37,22 @@ from typing import Callable
 
 
 # ---------------------------------------------------------------------------
-# Scanner configuration
+# QR scanner configuration
 # ---------------------------------------------------------------------------
 # "alternate": run alternate_read.py on the Pi. The Pi's camera scans QR codes
 #              and sends them to the server at SERVER_IP:SERVER_PORT
 #              (server/alternate_send.py).
 # "offgrid":   run pi_qr_read_server.py on the Pi. It listens on SERVER_PORT
-#              and a separate scanner (e.g. a laptop) sends scans to it.
+#              and a separate QR scanner (e.g. a laptop) sends scans to it.
 
 
-SCAN_SOURCE = "alternate"
+QR_SCAN_SOURCE = "alternate"
 SERVER_IP = "192.168.1.50"      # only used by "alternate"
 SERVER_PORT = 5000
-SCANNER_RESTART_DELAY = 5.0     # seconds to wait before relaunching a scanner that exited
+QR_SCANNER_RESTART_DELAY = 5.0     # seconds to wait before relaunching a QR scanner that exited
 
 PI_DIR = os.path.dirname(os.path.abspath(__file__))
-EVENT_PREFIX = "FLIGHT_EVENT "  # scanner output lines starting with this carry JSON results
+EVENT_PREFIX = "FLIGHT_EVENT "  # QR scanner output lines starting with this carry JSON results
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +65,8 @@ shared = {
     "home" : None,            # (lat_e7, lon_e7) of home position
 }
 
-# Filled by the scanner's output reader thread, drained by the scan task.
-scan_queue: "queue.Queue[dict]" = queue.Queue()
+# Filled by the QR scanner's output reader thread, drained by the QR scan task.
+qr_scan_queue: "queue.Queue[dict]" = queue.Queue()
 
 
 # ---------------------------------------------------------------------------
@@ -82,40 +82,40 @@ class Task:
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Scan handling
+# Task 1: QR scan handling
 # ---------------------------------------------------------------------------
-class ScanState(Enum):
+class QrScanState(Enum):
     START = auto()
     WAIT = auto()
     PROCESS = auto()
 
 
-def scan_tick(state):
+def qrScan_tick(state):
     # --- transitions ---
-    if state == ScanState.START:
-        state = ScanState.WAIT
-    elif state == ScanState.WAIT:
-        if not scan_queue.empty():
-            state = ScanState.PROCESS
-    elif state == ScanState.PROCESS:
-        state = ScanState.WAIT
+    if state == QrScanState.START:
+        state = QrScanState.WAIT
+    elif state == QrScanState.WAIT:
+        if not qr_scan_queue.empty():
+            state = QrScanState.PROCESS
+    elif state == QrScanState.PROCESS:
+        state = QrScanState.WAIT
     else:
-        state = ScanState.START
+        state = QrScanState.START
 
     # --- actions ---
-    if state == ScanState.PROCESS:
+    if state == QrScanState.PROCESS:
         try:
-            scan = scan_queue.get_nowait()
+            qr_scan = qr_scan_queue.get_nowait()
         except queue.Empty:
             return state
-        if scan.get("type") == "gps":
+        if qr_scan.get("type") == "gps":
             try:
-                shared["waypoint"] = (int(scan["lat_e7"]), int(scan["lon_e7"]))
+                shared["waypoint"] = (int(qr_scan["lat_e7"]), int(qr_scan["lon_e7"]))
                 print(f"[flight] waypoint received: {shared['waypoint']}")
             except (KeyError, TypeError, ValueError):
-                print(f"[flight] ignoring malformed GPS scan: {scan}")
-        elif scan.get("type") == "mapped":
-            print(f"[flight] mapped scan received: {scan}")  # TODO: act on files/values
+                print(f"[flight] ignoring malformed GPS QR scan: {qr_scan}")
+        elif qr_scan.get("type") == "mapped":
+            print(f"[flight] mapped QR scan received: {qr_scan}")  # TODO: act on files/values
 
     return state
 
@@ -138,7 +138,7 @@ def flight_tick(state):
         state = FlightState.IDLE
     elif state == FlightState.IDLE:
         if shared["waypoint"] is not None:
-            scanner.stop()
+            qr_scanner.stop()
             state = FlightState.ARMING
     elif state == FlightState.ARMING:
         if shared["armed"]:
@@ -152,7 +152,7 @@ def flight_tick(state):
     elif state == FlightState.LAND:
         # TODO: check landed
         shared["mission_done"] = True
-        shared["waypoint"] = None   # clear so IDLE waits for a new scan
+        shared["waypoint"] = None   # clear so IDLE waits for a new QR scan
         shared["armed"] = False
         state = FlightState.IDLE
     else:
@@ -160,7 +160,7 @@ def flight_tick(state):
 
     # --- actions ---
     if state == FlightState.IDLE:
-        scanner.ensure_running()  # launches on entry, relaunches if it exits
+        qr_scanner.ensure_running()  # launches on entry, relaunches if it exits
     elif state == FlightState.ARMING:
         pass  # TODO: send arm command (non-blocking), set shared["armed"] on ack
     elif state == FlightState.TAKEOFF:
@@ -232,9 +232,9 @@ def publishPhoto_tick(state):
 # Scheduler
 # ---------------------------------------------------------------------------
 TASKS = [
-    Task("scan",      period=0.05, state=ScanState.START,      tick=scan_tick),
+    Task("qrScan",    period=0.05, state=QrScanState.START,      tick=qrScan_tick),
     Task("flight",    period=0.10, state=FlightState.START,    tick=flight_tick),
-    Task("telemetryScan", period=1.00, state=TelemetryScanState.START, tick=telemetryScan_tick),
+    Task("telemetryScan", period=0.50, state=TelemetryScanState.START, tick=telemetryScan_tick),
     Task("publishPhoto", period=5.00, state=PublishPhotoState.START, tick=publishPhoto_tick),
 ]
 
@@ -269,25 +269,25 @@ def run():
 
 
 # ---------------------------------------------------------------------------
-# Scanner process (runs alternate_read.py or pi_qr_read_server.py)
+# QR scanner process (runs alternate_read.py or pi_qr_read_server.py)
 # ---------------------------------------------------------------------------
-def scanner_command():
-    if SCAN_SOURCE == "alternate":
+def qr_scanner_command():
+    if QR_SCAN_SOURCE == "alternate":
         script, args = "alternate_read.py", ["--ip", SERVER_IP, "--port", str(SERVER_PORT)]
-    elif SCAN_SOURCE == "offgrid":
+    elif QR_SCAN_SOURCE == "offgrid":
         script, args = "pi_qr_read_server.py", ["--port", str(SERVER_PORT)]
     else:
-        raise ValueError(f"SCAN_SOURCE must be 'alternate' or 'offgrid', not {SCAN_SOURCE!r}")
+        raise ValueError(f"QR_SCAN_SOURCE must be 'alternate' or 'offgrid', not {QR_SCAN_SOURCE!r}")
     # -u: unbuffered output, so results arrive as soon as they're printed
     return [sys.executable, "-u", os.path.join(PI_DIR, script), *args]
 
 
-class ScannerProcess:
-    """Starts/stops the scanner without blocking the tick functions.
+class QrScannerProcess:
+    """Starts/stops the QR scanner without blocking the tick functions.
 
-    A background thread reads the scanner's output. Lines starting with
+    A background thread reads the QR scanner's output. Lines starting with
     EVENT_PREFIX are JSON results confirmed by the server and go onto
-    scan_queue; everything else is echoed to this terminal.
+    qr_scan_queue; everything else is echoed to this terminal.
     """
 
     def __init__(self):
@@ -298,17 +298,17 @@ class ScannerProcess:
         return self.proc is not None and self.proc.poll() is None
 
     def ensure_running(self):
-        """Launch the scanner if it isn't running (rate-limited so a crash doesn't spin)."""
+        """Launch the QR scanner if it isn't running (rate-limited so a crash doesn't spin)."""
         if self.running():
             return
         if self.proc is not None:
-            print(f"[flight] scanner exited with code {self.proc.returncode}")
+            print(f"[flight] QR scanner exited with code {self.proc.returncode}")
             self.proc = None
-        if time.monotonic() - self.last_start < SCANNER_RESTART_DELAY:
+        if time.monotonic() - self.last_start < QR_SCANNER_RESTART_DELAY:
             return
         self.last_start = time.monotonic()
-        cmd = scanner_command()
-        print(f"[flight] launching scanner: {' '.join(cmd)}")
+        cmd = qr_scanner_command()
+        print(f"[flight] launching QR scanner: {' '.join(cmd)}")
         self.proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
@@ -316,11 +316,11 @@ class ScannerProcess:
         threading.Thread(target=self._read_output, args=(self.proc,), daemon=True).start()
 
     def stop(self):
-        """Ask the scanner to quit. Waiting for it happens in a background thread."""
+        """Ask the QR scanner to quit. Waiting for it happens in a background thread."""
         proc, self.proc = self.proc, None
         if proc is None or proc.poll() is not None:
             return
-        print("[flight] stopping scanner")
+        print("[flight] stopping QR scanner")
         proc.terminate()
         threading.Thread(target=self._reap, args=(proc,), daemon=True).start()
 
@@ -337,14 +337,14 @@ class ScannerProcess:
             line = line.rstrip("\n")
             if line.startswith(EVENT_PREFIX):
                 try:
-                    scan_queue.put(json.loads(line[len(EVENT_PREFIX):]))
+                    qr_scan_queue.put(json.loads(line[len(EVENT_PREFIX):]))
                 except json.JSONDecodeError:
-                    print(f"[flight] bad event from scanner: {line!r}")
+                    print(f"[flight] bad event from QR scanner: {line!r}")
             else:
-                print(f"[scanner] {line}")
+                print(f"[qr scanner] {line}")
 
 
-scanner = ScannerProcess()
+qr_scanner = QrScannerProcess()
 
 def send_photo():
     print("Sending photo to server...    TODO: implement photo sending logic")
@@ -360,6 +360,6 @@ if __name__ == "__main__":
         print(f"\nFlight server crashed: {e!r}")
         raise
     finally:
-        scanner.stop()
+        qr_scanner.stop()
         print(f"Final shared state: {shared}")
         print(f"Final task states: {[t.state for t in TASKS]}")
